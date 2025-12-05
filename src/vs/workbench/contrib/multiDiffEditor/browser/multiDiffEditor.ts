@@ -5,11 +5,16 @@
 
 import * as DOM from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { Disposable, toDisposable } from '../../../../base/common/lifecycle.js';
+import { autorun, IObservable } from '../../../../base/common/observable.js';
 import { MultiDiffEditorWidget } from '../../../../editor/browser/widget/multiDiffEditor/multiDiffEditorWidget.js';
 import { IResourceLabel, IWorkbenchUIElementFactory } from '../../../../editor/browser/widget/multiDiffEditor/workbenchUIElementFactory.js';
 import { ITextResourceConfigurationService } from '../../../../editor/common/services/textResourceConfiguration.js';
+import { HiddenItemStrategy, MenuWorkbenchToolBar } from '../../../../platform/actions/browser/toolbar.js';
+import { IMenuService, MenuId } from '../../../../platform/actions/common/actions.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { InstantiationService } from '../../../../platform/instantiation/common/instantiationService.js';
+import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
@@ -29,6 +34,7 @@ import { IDiffEditor } from '../../../../editor/common/editorCommon.js';
 import { Range } from '../../../../editor/common/core/range.js';
 import { MultiDiffEditorItem } from './multiDiffSourceResolverService.js';
 import { IEditorProgressService } from '../../../../platform/progress/common/progress.js';
+import { ResourceContextKey } from '../../../common/contextkeys.js';
 
 export class MultiDiffEditor extends AbstractEditorWithViewState<IMultiDiffEditorViewState> {
 	static readonly ID = 'multiDiffEditor';
@@ -50,6 +56,7 @@ export class MultiDiffEditor extends AbstractEditorWithViewState<IMultiDiffEdito
 		@IEditorGroupsService editorGroupService: IEditorGroupsService,
 		@ITextResourceConfigurationService textResourceConfigurationService: ITextResourceConfigurationService,
 		@IEditorProgressService private editorProgressService: IEditorProgressService,
+		@IMenuService private readonly menuService: IMenuService,
 	) {
 		super(
 			MultiDiffEditor.ID,
@@ -75,6 +82,16 @@ export class MultiDiffEditor extends AbstractEditorWithViewState<IMultiDiffEdito
 		this._register(this._multiDiffEditorWidget.onDidChangeActiveControl(() => {
 			this._onDidChangeControl.fire();
 		}));
+
+		const scopedContextKeyService = this._multiDiffEditorWidget.getContextKeyService();
+		const scopedInstantiationService = this._multiDiffEditorWidget.getScopedInstantiationService();
+		this._register(new MultiDiffEditorContentMenuOverlay(
+			this._multiDiffEditorWidget.getRootElement(),
+			this._multiDiffEditorWidget.getViewModelObservable(),
+			scopedContextKeyService,
+			this.menuService,
+			scopedInstantiationService,
+		));
 	}
 
 	override async setInput(input: MultiDiffEditorInput, options: IMultiDiffEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -160,6 +177,41 @@ export class MultiDiffEditor extends AbstractEditorWithViewState<IMultiDiffEdito
 
 	public async showWhile(promise: Promise<unknown>): Promise<void> {
 		return this.editorProgressService.showWhile(promise);
+	}
+}
+
+class MultiDiffEditorContentMenuOverlay extends Disposable {
+	constructor(
+		root: HTMLElement,
+		viewModel: IObservable<MultiDiffEditorViewModel | undefined>,
+		contextKeyService: IContextKeyService,
+		menuService: IMenuService,
+		instantiationService: IInstantiationService,
+	) {
+		super();
+
+		const menu = this._register(menuService.createMenu(MenuId.MultiDiffEditorContent, contextKeyService));
+		if (menu.getActions().length === 0) {
+			return;
+		}
+
+		const resourceContextKey = this._register(instantiationService.createInstance(ResourceContextKey));
+		this._register(autorun(reader => {
+			const vm = viewModel.read(reader);
+			const active = vm?.activeDiffItem.read(reader);
+			const items = vm?.items.read(reader);
+			const firstItem = items?.[0];
+			const resource = active?.modifiedUri ?? active?.originalUri ?? firstItem?.modifiedUri ?? firstItem?.originalUri ?? null;
+			resourceContextKey.set(resource);
+		}));
+
+		const container = DOM.h('div.floating-menu-overlay-widget.multi-diff-root-floating-menu');
+		root.appendChild(container.root);
+		this._register(toDisposable(() => container.root.remove()));
+
+		this._register(instantiationService.createInstance(MenuWorkbenchToolBar, container.root, MenuId.MultiDiffEditorContent, {
+			hiddenItemStrategy: HiddenItemStrategy.NoHide,
+		}));
 	}
 }
 
